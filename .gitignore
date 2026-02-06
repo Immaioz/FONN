@@ -2,3 +2,4 @@ OLD/*
 papers/*
 data/*
 .venv/
+__pycache__/
