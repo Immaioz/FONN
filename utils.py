@@ -1,4 +1,6 @@
+from pathlib import Path
 import tensorflow as tf
+import os
 from tensorflow import keras
 from keras import layers
 import utils_activation_FO as uaf
@@ -10,6 +12,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 # ============== PREPROCESSING ==============
 class preprocessing:
+    @staticmethod
     def create_data(data, n_past= 5, n_future=3, last_only=True):
         X, y = [], []
         
@@ -21,54 +24,34 @@ class preprocessing:
                 y.append(data['out'].iloc[i+n_past:i+n_past+n_future].values)
         
         return np.array(X), np.array(y)
+    
+    @staticmethod
+    def create_lagged(df, num_lags, selected_columns=None, columns_to_remove=None):
+        df_copy = df.copy()
+        # Remove specified columns
+        if columns_to_remove is not None:
+            df_copy = df_copy.drop(columns_to_remove, axis=1)
+
+        # Create lagged variables for selected columns
+        if selected_columns is not None:
+            for var in selected_columns:
+                for lag in range(1, num_lags + 1):
+                    df_copy[f'{var}_t_{lag}'] = df_copy[var].shift(lag)
+        else:
+            for var in df_copy.columns:
+                if var == 'out':  # Assuming 'out' is the target variable and should not be lagged
+                    df_copy[f'{var}_t_1'] = df_copy[var].shift(1)
+                    continue
+                for lag in range(1, num_lags + 1):
+                    df_copy[f'{var}_t_{lag}'] = df_copy[var].shift(lag)
+
+        df_copy = df_copy.dropna()
+
+        return df_copy
+
 
 # ============== MODEL BUILDERS ==============
 class model:
-    # def fixed(num_input, num_hidden, num_output, activation, seed=None):
-    #     initializer = tf.keras.initializers.GlorotUniform(seed=seed)
-        
-    #     model = keras.Sequential([
-    #         layers.Input(shape=(num_input,)),
-    #         layers.Dense(num_hidden, 
-    #                     kernel_initializer=initializer, activation=activation),
-    #         layers.Dense(num_hidden, kernel_initializer=initializer, activation=activation),
-    #         layers.Dense(num_output, activation='linear', kernel_initializer=initializer)
-    #     ])
-    #     return model
-
-    # def per_layer(num_input, num_hidden, num_output, activation, seed=None):
-    #     initializer = tf.keras.initializers.GlorotUniform(seed=seed)
-        
-    #     model = keras.Sequential([
-    #         layers.Input(shape=(num_input,)),
-    #         layers.Dense(num_hidden, 
-    #                     kernel_initializer=initializer),
-    #         activation,
-    #         layers.Dense(num_hidden, kernel_initializer=initializer),
-    #         activation,
-    #         layers.Dense(num_output, activation='linear', kernel_initializer=initializer)
-    #     ])
-    #     return model
-
-    # def per_neuron(num_input, num_hidden, num_output, bias=True, activation='Relu', seed=None):  
-    #     inputs = keras.Input(shape=(num_input,))
-        
-    #     if activation == 'Relu':
-    #         x = uaf.PerNeuronRelu(num_hidden, use_bias=bias, seed=seed)(inputs)
-    #         x = uaf.PerNeuronRelu(num_hidden, use_bias=bias, seed=seed)(x)
-    #     elif activation == 'Sigmoid':
-    #         x = uaf.PerNeuronSigmoid(num_hidden, use_bias=bias, seed=seed)(inputs)
-    #         x = uaf.PerNeuronSigmoid(num_hidden, use_bias=bias, seed=seed)(x)
-    #     elif activation == 'Tanh':
-    #         x = uaf.PerNeuronTanh(num_hidden, use_bias=bias, seed=seed)(inputs)
-    #         x = uaf.PerNeuronTanh(num_hidden, use_bias=bias, seed=seed)(x)
-        
-    #     initializer = tf.keras.initializers.GlorotUniform(seed=seed)
-    #     outputs = layers.Dense(num_output, activation='linear', 
-    #                         kernel_initializer=initializer)(x)
-        
-    #     return keras.Model(inputs, outputs)
-
     def fixed(num_input, num_hidden, num_output, activation, num_hidden_layers=2, seed=None):
         """
         Build a Sequential model with a variable number of dense layers.
@@ -121,9 +104,9 @@ class model:
         model_layers = [layers.Input(shape=(num_input,))]
 
         activation_layers = {
-            'Relu': uaf.PerLayerRelu(),
-            'Sigmoid': uaf.PerLayerSigmoid(),
-            'Tanh': uaf.PerLayerTanh()
+            'relu': uaf.PerLayerRelu(),
+            'sigmoid': uaf.PerLayerSigmoid(),
+            'tanh': uaf.PerLayerTanh()
         }
                 
         activation = activation_layers[act]
@@ -139,7 +122,7 @@ class model:
         return model
 
 
-    def per_neuron(num_input, num_hidden, num_output, bias=True, activation='Relu', num_hidden_layers=2, seed=None):
+    def per_neuron(num_input, num_hidden, num_output, bias=True, activation='relu', num_hidden_layers=2, seed=None):
         """
         Build a Functional model with a variable number of hidden layers using per-neuron activations.
         
@@ -148,16 +131,16 @@ class model:
         - num_hidden: int, number of units in hidden layers
         - num_output: int, number of units in output layer
         - bias: bool, whether to use bias in hidden layers
-        - activation: str, type of activation ('Relu', 'Sigmoid', 'Tanh')
+        - activation: str, type of activation ('relu', 'sigmoid', 'tanh')
         - num_hidden_layers: int, number of hidden layers. Default is 2.
         - seed: int, optional seed for initializer and layers
         """
         inputs = keras.Input(shape=(num_input,))
         
         activation_classes = {
-            'Relu': uaf.PerNeuronRelu,
-            'Sigmoid': uaf.PerNeuronSigmoid,
-            'Tanh': uaf.PerNeuronTanh
+            'relu': uaf.PerNeuronRelu,
+            'sigmoid': uaf.PerNeuronSigmoid,
+            'tanh': uaf.PerNeuronTanh
         }
         
         if activation not in activation_classes:
@@ -224,35 +207,6 @@ class model:
                 alpha_after.append(layer.alpha.numpy().copy())
                 
         return alpha_after
-    
-    def plot_alpha_comparison(alpha_before, alpha_after):
-        fig, axes = plt.subplots(len(alpha_after["per_layer"]), 1, figsize=(10, 8), sharex=True)
-        labels = np.arange(len(alpha_before['per_neuron'][0]))
-
-        for i, ax in enumerate(axes):
-            ax.plot(
-                labels,
-                alpha_before['per_neuron'][i],
-                label='Before Training',
-                marker='o'
-            )
-            ax.plot(
-                labels,
-                alpha_after['per_neuron'][i],
-                label='After Training',
-                marker='x',
-                color='orange'
-            )
-
-            ax.set_title(f'Layer {i} - Alpha Before and After Training')
-            ax.set_ylabel('Alpha Value')
-            ax.grid(True)
-            ax.legend()
-
-        axes[-1].set_xlabel('Neuron Index')
-
-        plt.tight_layout()
-        plt.show()
 
     @staticmethod
     def print_alpha_per_layer(alpha_before, alpha_after, model):
@@ -328,7 +282,7 @@ class model:
 
 # ============== PLOTS ==============
 class plots:
-    def __init__(self, histories, models, X_test, y_test, y_scaler):
+    def __init__(self, histories, models, X_test, y_test, y_scaler,  save_path="", n_steps=None):
          self.history_fixed = histories["fixed"]
          self.history_per_layer = histories["per_layer"]
          self.history_per_neuron = histories["per_neuron"]
@@ -338,10 +292,51 @@ class plots:
          self.X_test = X_test
          self.y_test = y_test
          self.y_scaler = y_scaler
+         self.n_steps = n_steps
+         self.save_path = save_path
+         self.check_path()
          self.compute_predictions()
 
+    def check_path(self):
+        if self.save_path:
+            os.makedirs(self.save_path, exist_ok=True)
+
+    def plot_alpha_comparison(self, alpha_before, alpha_after,  save=False):
+        fig, axes = plt.subplots(len(alpha_after["per_layer"]), 1, figsize=(10, 8), sharex=True)
+        labels = np.arange(len(alpha_before['per_neuron'][0]))
+
+        for i, ax in enumerate(axes):
+            ax.plot(
+                labels,
+                alpha_before['per_neuron'][i],
+                label='Before Training',
+                marker='o'
+            )
+            ax.plot(
+                labels,
+                alpha_after['per_neuron'][i],
+                label='After Training',
+                marker='x',
+                color='orange'
+            )
+
+            ax.set_title(f'Layer {i} - Alpha Before and After Training')
+            ax.set_ylabel('Alpha Value')
+            ax.grid(True)
+            ax.legend()
+            ax.set_ylim(-1,1)
+            if "Tanh" in self.save_path:
+                ax.set_ylim(0,1)
+
+        axes[-1].set_xlabel('Neuron Index')
+
+        plt.tight_layout()
+        if save:    
+            plt.savefig(self.save_path + "/alpha_comparison.png")
+        plt.show()
+
     # 1. Plot training and validation loss
-    def plot_history(self):
+    def plot_history(self,  save=False):
         plt.figure(figsize=(15, 5))
 
         plt.subplot(1, 3, 1)
@@ -372,10 +367,12 @@ class plots:
         plt.grid(True)
 
         plt.tight_layout()
+        if save:
+            plt.savefig(self.save_path + "/loss.png")
         plt.show()
 
     # 2. Plot training and validation MAE
-    def plot_mae(self):
+    def plot_mae(self,  save=False):
         plt.figure(figsize=(15, 5))
 
         plt.subplot(1, 3, 1)
@@ -406,10 +403,12 @@ class plots:
         plt.grid(True)
 
         plt.tight_layout()
+        if save:
+            plt.savefig(self.save_path + "/mae.png")
         plt.show()
 
     # 3. Predictions vs Actual for test set
-    def plot_predictions(self):
+    def plot_predictions(self,  save=False):
         plt.figure(figsize=(15, 5))
 
         plt.subplot(1, 3, 1)
@@ -437,10 +436,12 @@ class plots:
         plt.grid(True)
 
         plt.tight_layout()
+        if save:
+            plt.savefig(self.save_path + "/test_predictions.png")
         plt.show()
 
     # 4. Plot actual vs predicted time series for first 100 samples
-    def plot_time_series(self, sample_size=100):
+    def plot_time_series(self,  sample_size=100, save=False):
         plt.figure(figsize=(15, 5))
 
         sample_size = min(sample_size, len(self.y_test))
@@ -473,22 +474,22 @@ class plots:
         plt.grid(True)
 
         plt.tight_layout()
+        if save:
+            plt.savefig(self.save_path + "/time_series_comparison.png")
         plt.show()
 
     # 5. Print final evaluation metrics
-    def print_final_metrics(self):
+    def print_final_metrics(self, save=False):
         print("=" * 60)
         print("FINAL EVALUATION METRICS")
         print("=" * 60)
 
-        # Dizionario dei modelli e delle relative predizioni
         models_preds = {
             "Fixed": self.y_pred_fixed_orig,
             "Per-Layer": self.y_pred_per_layer_orig,
             "Per-Neuron": self.y_pred_per_neuron_orig
         }
 
-        # Lista per costruire il DataFrame
         metrics_list = []
 
         for name, y_pred in models_preds.items():
@@ -507,19 +508,48 @@ class plots:
 
         print("=" * 60)
 
-        # Creazione del DataFrame
         metrics_df = pd.DataFrame(metrics_list)
+        if save:
+            metrics_df.to_csv(self.save_path + "/final_metrics.csv", index=False)
         return metrics_df
 
 
 
     def compute_predictions(self):
-        self.y_pred_fixed = self.model_fixed.predict(self.X_test, verbose=0)
-        self.y_pred_per_layer = self.model_per_layer.predict(self.X_test, verbose=0)
-        self.y_pred_per_neuron = self.model_per_neuron.predict(self.X_test, verbose=0)
+        if self.n_steps:
+            self.y_pred_fixed = self.multi_step_ahead_pred(self.model_fixed)
+            self.y_pred_per_layer = self.multi_step_ahead_pred(self.model_per_layer)
+            self.y_pred_per_neuron = self.multi_step_ahead_pred(self.model_per_neuron)
+        else:
+            self.y_pred_fixed = self.model_fixed.predict(self.X_test, verbose=0)
+            self.y_pred_per_layer = self.model_per_layer.predict(self.X_test, verbose=0)
+            self.y_pred_per_neuron = self.model_per_neuron.predict(self.X_test, verbose=0)
 
         # Inverse transform to original scale
         self.y_test_orig = self.y_scaler.inverse_transform(self.y_test)
         self.y_pred_fixed_orig = self.y_scaler.inverse_transform(self.y_pred_fixed)
         self.y_pred_per_layer_orig = self.y_scaler.inverse_transform(self.y_pred_per_layer)
         self.y_pred_per_neuron_orig = self.y_scaler.inverse_transform(self.y_pred_per_neuron)
+
+    def multi_step_ahead_pred(self, model):
+
+        X_curr = self.X_test.copy()
+        
+        preds = [None] * len(X_curr)  
+
+        for start in (range(0, len(X_curr), self.n_steps)):
+            X_start = X_curr[start:start+1].copy()
+        
+            for step in range(self.n_steps):
+                current_idx = start + step
+                if current_idx >= len(X_curr):
+                    break  
+            
+                y_hat = model.predict(X_start, verbose=0).squeeze()
+                preds[current_idx] = y_hat
+            
+                if step + 1 < self.n_steps and current_idx + 1 < len(X_curr):
+                    X_start[0, -1] = y_hat
+
+        y_test_ = np.array(preds)
+        return y_test_.reshape(-1, 1)
