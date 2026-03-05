@@ -1,4 +1,5 @@
 from pathlib import Path
+from pyparsing import results
 import tensorflow as tf
 import os
 from tensorflow import keras
@@ -9,6 +10,8 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import pandas as pd
 from sklearn.metrics import mean_squared_error, mean_absolute_error
+# ============== EXTRA ==============
+
 
 # ============== PREPROCESSING ==============
 class preprocessing:
@@ -48,7 +51,6 @@ class preprocessing:
         df_copy = df_copy.dropna()
 
         return df_copy
-
 
 # ============== MODEL BUILDERS ==============
 class model:
@@ -247,7 +249,7 @@ class model:
                 model.print_alpha_per_layer(alpha_before, alpha_after, models[type])
             case 'per_neuron':
                 model.print_alpha_per_neuron(alpha_before, alpha_after, models[type])
-
+   
     def train_models(X_train, y_train, models, EPOCHS=100, BATCH_SIZE=32, VAL_SPLIT=0.2, verbose=0, show_progress=True, EarlyStopping=True):
         iterator = (
             tqdm(models.items(), desc="Training models")
@@ -334,6 +336,46 @@ class plots:
         if save:    
             plt.savefig(self.save_path + "/alpha_comparison.png")
         plt.show()
+
+    def export_alpha_comparison(self, alpha_before, alpha_after):
+        rows = []
+        indices = []
+    
+        n_layers = len(alpha_before["per_neuron"])
+        n_neurons = len(alpha_before["per_neuron"][0])
+
+        # Per ogni layer - aggiungi i neuroni
+        for l in range(n_layers):
+            before = alpha_before["per_neuron"][l]
+            after = alpha_after["per_neuron"][l]
+            
+            # Aggiungi i neuroni di questo layer
+            for n in range(n_neurons):
+                row_data = {
+                    "before": before[n],
+                    "after": after[n],
+                    "delta": after[n] - before[n]
+                }
+                rows.append(row_data)
+                indices.append(f"neuron_{n}_layer_{l}")
+
+        # Aggiungi tutti i layer alla fine
+        for l in range(n_layers):
+            before_val = float(alpha_before["per_layer"][l][0])
+            after_val = float(alpha_after["per_layer"][l][0])
+            delta_val = after_val - before_val
+            
+            row_data = {
+                "before": before_val,
+                "after": after_val,
+                "delta": delta_val
+            }
+            rows.append(row_data)
+            indices.append(f"per_layer_{l}")
+
+        df = pd.DataFrame(rows, index=indices)
+        df.index.name = "neuron_index"
+        df.to_csv(self.save_path + "/alpha_comparison.csv")
 
     # 1. Plot training and validation loss
     def plot_history(self,  save=False):
@@ -512,10 +554,9 @@ class plots:
         if save:
             metrics_df.to_csv(self.save_path + "/final_metrics.csv", index=False)
         return metrics_df
+    
 
-
-
-    def compute_predictions(self):
+    def compute_predictions(self, scale_back=False, return_preds=False):
         if self.n_steps:
             self.y_pred_fixed = self.multi_step_ahead_pred(self.model_fixed)
             self.y_pred_per_layer = self.multi_step_ahead_pred(self.model_per_layer)
@@ -525,31 +566,56 @@ class plots:
             self.y_pred_per_layer = self.model_per_layer.predict(self.X_test, verbose=0)
             self.y_pred_per_neuron = self.model_per_neuron.predict(self.X_test, verbose=0)
 
-        # Inverse transform to original scale
-        self.y_test_orig = self.y_scaler.inverse_transform(self.y_test)
-        self.y_pred_fixed_orig = self.y_scaler.inverse_transform(self.y_pred_fixed)
-        self.y_pred_per_layer_orig = self.y_scaler.inverse_transform(self.y_pred_per_layer)
-        self.y_pred_per_neuron_orig = self.y_scaler.inverse_transform(self.y_pred_per_neuron)
+
+        if scale_back == True:        
+            # # Inverse transform to original scale
+            self.y_test_orig = self.y_scaler.inverse_transform(self.y_test)
+            self.y_pred_fixed_orig = self.y_scaler.inverse_transform(self.y_pred_fixed)
+            self.y_pred_per_layer_orig = self.y_scaler.inverse_transform(self.y_pred_per_layer)
+            self.y_pred_per_neuron_orig = self.y_scaler.inverse_transform(self.y_pred_per_neuron)
+        else:
+            self.y_test_orig = self.y_test
+            self.y_pred_fixed_orig = self.y_pred_fixed
+            self.y_pred_per_layer_orig = self.y_pred_per_layer
+            self.y_pred_per_neuron_orig = self.y_pred_per_neuron
+        if return_preds:
+            return self.get_preds()
+
+    def get_preds(self):
+        return self.y_test_orig, self.y_pred_fixed_orig, self.y_pred_per_layer_orig, self.y_pred_per_neuron_orig
 
     def multi_step_ahead_pred(self, model):
-
         X_curr = self.X_test.copy()
+        n_samples = len(X_curr)
         
-        preds = [None] * len(X_curr)  
-
-        for start in (range(0, len(X_curr), self.n_steps)):
-            X_start = X_curr[start:start+1].copy()
+        # Pre-alloca array NumPy invece di lista
+        preds = np.empty(n_samples, dtype=np.float32)
         
-            for step in range(self.n_steps):
+        for start in range(0, n_samples, self.n_steps):
+            end = min(start + self.n_steps, n_samples)
+            
+            for step in range(end - start):
                 current_idx = start + step
-                if current_idx >= len(X_curr):
-                    break  
-            
-                y_hat = model.predict(X_start, verbose=0).squeeze()
+                # print(f"Predicting step {step+1}/{self.n_steps} for sample {current_idx+1}/{n_samples}")
+                
+                X_atm = X_curr[current_idx:current_idx+1]
+                # print(f"Current input: {X_atm}")
+                y_hat = model.predict(X_atm, verbose=0)[0, 0]
+                # print(f"Predicted value: {y_hat}")
                 preds[current_idx] = y_hat
-            
-                if step + 1 < self.n_steps and current_idx + 1 < len(X_curr):
-                    X_start[0, -1] = y_hat
+                
+                # Aggiorna solo se non è l'ultimo step del blocco o dell'array
+                if current_idx + 1 < end and current_idx + 1 < n_samples:
+                    X_curr[current_idx + 1, -1] = y_hat
+        
+        return preds.reshape(-1, 1)
+    
+    def save_y(self):
+        results = {
+            "y_pred_fixed": self.y_pred_fixed,
+            "y_pred_per_layer": self.y_pred_per_layer,
+            "y_pred_per_neuron": self.y_pred_per_neuron,
+            "y_test": self.y_test
+        }
 
-        y_test_ = np.array(preds)
-        return y_test_.reshape(-1, 1)
+        np.savez(self.save_path + "/All_y.npz", **results)
